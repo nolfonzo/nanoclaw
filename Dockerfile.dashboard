@@ -1,0 +1,6 @@
+FROM node:22-slim
+WORKDIR /app
+RUN npm install -g tsx
+COPY src/qantas-dashboard.ts .
+EXPOSE 3001
+CMD ["tsx", "qantas-dashboard.ts"]
