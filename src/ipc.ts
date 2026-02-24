@@ -245,10 +245,11 @@ export async function processTaskIpc(
           }
         } else if (scheduleType === 'interval') {
           const ms = parseInt(data.schedule_value, 10);
-          if (isNaN(ms) || ms <= 0) {
+          const MIN_INTERVAL_MS = 60_000; // 1 minute minimum — prevents accidental DoS
+          if (isNaN(ms) || ms < MIN_INTERVAL_MS) {
             logger.warn(
-              { scheduleValue: data.schedule_value },
-              'Invalid interval',
+              { scheduleValue: data.schedule_value, minMs: MIN_INTERVAL_MS },
+              'Invalid or too-short interval',
             );
             break;
           }

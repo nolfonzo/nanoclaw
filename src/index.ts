@@ -32,6 +32,7 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
+  getRecentMessages,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -40,6 +41,7 @@ import {
   storeChatMetadata,
   storeMessage,
 } from './db.js';
+import { cleanupOrphans } from './container-runtime.js';
 import { GroupQueue } from './group-queue.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
@@ -49,6 +51,53 @@ import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
 export { escapeXml, formatMessages } from './router.js';
+
+// Claude Sonnet 4.6 pricing (per million tokens)
+const INPUT_COST_PER_M = 3.00;
+const OUTPUT_COST_PER_M = 15.00;
+const USAGE_FILE = path.resolve(DATA_DIR, '..', '..', 'weon', 'usage.json');
+
+interface UsageRun {
+  timestamp: string;
+  group: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+interface UsageFile {
+  runs: UsageRun[];
+  totals: { inputTokens: number; outputTokens: number; costUsd: number };
+}
+
+function appendUsage(group: string, inputTokens: number, outputTokens: number): void {
+  if (!inputTokens && !outputTokens) return;
+  try {
+    const costUsd = (inputTokens / 1_000_000) * INPUT_COST_PER_M +
+                    (outputTokens / 1_000_000) * OUTPUT_COST_PER_M;
+    const run: UsageRun = {
+      timestamp: new Date().toISOString(),
+      group,
+      inputTokens,
+      outputTokens,
+      costUsd: Math.round(costUsd * 100000) / 100000,
+    };
+    let data: UsageFile = { runs: [], totals: { inputTokens: 0, outputTokens: 0, costUsd: 0 } };
+    if (fs.existsSync(USAGE_FILE)) {
+      try { data = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf-8')); } catch { /* start fresh */ }
+    }
+    data.runs.push(run);
+    // Keep last 1000 runs to avoid unbounded growth
+    if (data.runs.length > 1000) data.runs = data.runs.slice(-1000);
+    data.totals.inputTokens += inputTokens;
+    data.totals.outputTokens += outputTokens;
+    data.totals.costUsd = Math.round((data.totals.costUsd + costUsd) * 100000) / 100000;
+    fs.writeFileSync(USAGE_FILE, JSON.stringify(data, null, 2));
+    logger.debug({ group, inputTokens, outputTokens, costUsd: run.costUsd }, 'Usage recorded');
+  } catch (err) {
+    logger.warn({ err }, 'Failed to write usage file');
+  }
+}
 
 let lastTimestamp = '';
 let sessions: Record<string, string> = {};
@@ -148,7 +197,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
+  // Build prompt: prepend recent conversation history as context so the agent
+  // has continuity without needing slow session replay via the Claude SDK.
+  const CONTEXT_MESSAGES = 20;
+  const oldestMissed = missedMessages[0].timestamp;
+  const contextMessages = getRecentMessages(chatJid, CONTEXT_MESSAGES + missedMessages.length, ASSISTANT_NAME)
+    .filter(m => m.timestamp < oldestMissed);
+  const prompt = contextMessages.length > 0
+    ? `[Recent conversation context]\n${formatMessages(contextMessages)}\n\n[New messages to respond to]\n${formatMessages(missedMessages)}`
+    : formatMessages(missedMessages);
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -174,8 +231,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   };
 
   await channel.setTyping?.(chatJid, true);
+  await channel.sendMessage(chatJid, '⏳');
   let hadError = false;
   let outputSentToUser = false;
+  let runInputTokens = 0;
+  let runOutputTokens = 0;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -192,6 +252,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
+    if (result.inputTokens) runInputTokens = result.inputTokens;
+    if (result.outputTokens) runOutputTokens = result.outputTokens;
+
     if (result.status === 'error') {
       hadError = true;
     }
@@ -199,6 +262,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+  appendUsage(group.folder, runInputTokens, runOutputTokens);
 
   if (output === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -224,7 +288,10 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  // Don't resume sessions across container restarts — session replay requires
+  // re-running every previous turn through the Claude API, which gets very slow
+  // as history grows. Context is provided via the prompt instead.
+  const sessionId = undefined;
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -370,7 +437,8 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
+            // Ack + typing indicator for piped messages (same UX as processGroupMessages)
+            channel.sendMessage(chatJid, '⏳').catch(() => {});
             channel.setTyping?.(chatJid, true);
           } else {
             // No active container — enqueue for a new one
@@ -471,24 +539,8 @@ function ensureContainerSystemRunning(): void {
       logger.warn({ err }, 'Failed to clean up orphaned Apple containers');
     }
   } else {
-    // Linux/Docker: kill orphaned NanoClaw containers via docker CLI
-    try {
-      const output = execSync(
-        'docker ps --filter name=nanoclaw- --format {{.Names}}',
-        { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
-      );
-      const orphans = output.trim().split('\n').filter(Boolean);
-      for (const name of orphans) {
-        try {
-          execSync(`docker stop ${name}`, { stdio: 'pipe' });
-        } catch { /* already stopped */ }
-      }
-      if (orphans.length > 0) {
-        logger.info({ count: orphans.length, names: orphans }, 'Stopped orphaned Docker containers');
-      }
-    } catch (err) {
-      logger.warn({ err }, 'Failed to clean up orphaned Docker containers');
-    }
+    // Linux/Docker: delegate to container-runtime so the logic stays in one place
+    cleanupOrphans();
   }
 }
 

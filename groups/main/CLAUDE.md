@@ -228,20 +228,20 @@ The task will run in that group's context with access to their files and memory.
 
 The dashboard (`nanoclaw-dashboard`) handles award seat checking via seats.aero (hourly) and tracks combined round-trip prices. Your role is to deliver alerts, send first-run notifications, and handle cash price requests.
 
-All files are at `/workspace/extra/andy/qantas-monitor/`.
+All files are at `/workspace/extra/weon/qantas-monitor/`.
 
 ### Step 1: Deliver pending alerts
 
 The dashboard writes alerts here when it finds new availability or a new price low:
 
 ```bash
-cat /workspace/extra/andy/qantas-monitor/alerts-pending.json
+cat /workspace/extra/weon/qantas-monitor/alerts-pending.json
 ```
 
 For each entry, send the messages to the chat, then clear the file:
 
 ```bash
-echo '[]' > /workspace/extra/andy/qantas-monitor/alerts-pending.json
+echo '[]' > /workspace/extra/weon/qantas-monitor/alerts-pending.json
 ```
 
 WhatsApp format:
@@ -285,7 +285,7 @@ Then add the monitor's `id` to `first-notified.json` and save it.
 
 ### Step 3: Qantas points sales
 
-Check `https://www.qantas.com/au/en/frequent-flyer/points/buy-points.html` using agent-browser. A points sale = discounted rate to buy/transfer points (e.g. 15–20% bonus). Notify immediately if a new sale is found. Track in `/workspace/extra/andy/qantas-monitor/points-sale.json`.
+Check `https://www.qantas.com/au/en/frequent-flyer/points/buy-points.html` using agent-browser. A points sale = discounted rate to buy/transfer points (e.g. 15–20% bonus). Notify immediately if a new sale is found. Track in `/workspace/extra/weon/qantas-monitor/points-sale.json`.
 
 ### Step 4: Cash price requests
 
@@ -332,7 +332,7 @@ After writing results, clear `cash-requests.json` (write `[]`). The dashboard po
 
 ## Managing Dashboard Monitors
 
-You can add, remove, and list flight monitors on behalf of the user when they ask via WhatsApp. Monitors are stored in `/workspace/extra/andy/qantas-monitor/monitors.json`.
+You can add, remove, and list flight monitors on behalf of the user when they ask via WhatsApp. Monitors are stored in `/workspace/extra/weon/qantas-monitor/monitors.json`.
 
 ### Listing monitors
 

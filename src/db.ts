@@ -311,6 +311,25 @@ export function getNewMessages(
   return { messages: rows, newTimestamp };
 }
 
+export function getRecentMessages(
+  chatJid: string,
+  limit: number,
+  botPrefix: string,
+): NewMessage[] {
+  const sql = `
+    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    FROM messages
+    WHERE chat_jid = ? AND is_bot_message = 0 AND content NOT LIKE ?
+      AND content != '' AND content IS NOT NULL
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `;
+  const rows = db
+    .prepare(sql)
+    .all(chatJid, `${botPrefix}:%`, limit) as NewMessage[];
+  return rows.reverse();
+}
+
 export function getMessagesSince(
   chatJid: string,
   sinceTimestamp: string,

@@ -42,6 +42,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 interface VolumeMount {
@@ -188,6 +190,30 @@ function readSecrets(): Record<string, string> {
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Label agent containers so orphan cleanup can target them precisely
+  // (avoids killing nanoclaw-dashboard or other non-agent nanoclaw containers)
+  args.push('--label', 'nanoclaw.type=agent');
+
+  // Disable core dumps — crashes write multi-hundred-MB files into whatever
+  // directory the process happens to be in (e.g. skill dirs, group folder)
+  args.push('--ulimit', 'core=0');
+
+  // Chromium needs more than Docker's default 64MB /dev/shm for shared memory.
+  // Without this it crashes with "transport_dib.cc: SIGBUS" or similar.
+  args.push('--shm-size=256m');
+
+  // TCP keepalive: probe after 60s idle, every 10s, give up after 6 misses.
+  // Containers have their own network namespace so host sysctl doesn't apply —
+  // these must be set per-container to keep NAT entries alive during long
+  // streaming API calls (Anthropic responses can pause for 30–120s mid-stream).
+  args.push('--sysctl', 'net.ipv4.tcp_keepalive_time=60');
+  args.push('--sysctl', 'net.ipv4.tcp_keepalive_intvl=10');
+  args.push('--sysctl', 'net.ipv4.tcp_keepalive_probes=6');
+
+  // Allow container to reach host services (e.g. dashboard on port 3001)
+  // Use host.docker.internal:host-gateway on Linux (Docker 20.10+)
+  args.push('--add-host=host.docker.internal:host-gateway');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);

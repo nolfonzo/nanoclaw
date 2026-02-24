@@ -11,13 +11,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const PORT = 3001;
-const ANDY_DIR = '/workspace/extra/andy';
+const ANDY_DIR = '/workspace/extra/weon';
 const MONITOR_DIR = path.join(ANDY_DIR, 'qantas-monitor');
 const MONITORS_FILE = path.join(MONITOR_DIR, 'monitors.json');
 const ALERTS_FILE = path.join(MONITOR_DIR, 'alerts-pending.json');
 const KEY_FILE = path.join(ANDY_DIR, 'seats-aero-key');
 const CASH_REQUESTS_FILE = path.join(MONITOR_DIR, 'cash-requests.json');
 const CASH_RESULTS_FILE = path.join(MONITOR_DIR, 'cash-results.json');
+const USAGE_FILE = path.join(ANDY_DIR, 'usage.json');
+const TASKS_FILE = '/workspace/nanoclaw-ipc/current_tasks.json';
+const TASKS_META_FILE = path.join(MONITOR_DIR, 'scheduled-tasks.json');
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -448,6 +451,29 @@ input:focus{border-color:#e8002d}
 .edit-form.open{display:block}
 .edit-form h3{font-size:.8rem;font-weight:600;color:#6e6e73;margin-bottom:8px}
 .reset-note{font-size:.72rem;color:#ff9500;margin-top:8px}
+/* Tabs */
+.tab-nav{display:flex;gap:0;background:white;border-bottom:1px solid #e5e5ea;padding:0 16px;position:sticky;top:56px;z-index:9}
+.tab-btn{padding:8px 18px;border:none;background:none;cursor:pointer;font-size:.82rem;font-weight:500;color:#6e6e73;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab-btn.active{color:#e8002d;border-bottom-color:#e8002d}
+.tab-btn:hover:not(.active){color:#1d1d1f}
+/* Usage tab */
+.usage-section{background:white;border-radius:14px;box-shadow:0 1px 4px rgba(0,0,0,.1);padding:16px;margin-bottom:16px}
+.usage-section h2{font-size:.9rem;font-weight:600;color:#6e6e73;margin-bottom:12px}
+.usage-totals{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.uc{background:#f9f9fb;border-radius:10px;padding:10px 14px;flex:1;min-width:120px}
+.uc-label{font-size:.72rem;color:#6e6e73;margin-bottom:4px}
+.uc-val{font-size:1.1rem;font-weight:700;color:#1d1d1f}
+/* Scheduled tasks */
+.task-card{background:white;border-radius:14px;box-shadow:0 1px 4px rgba(0,0,0,.1);padding:16px;margin-bottom:12px;display:flex;align-items:center;gap:14px}
+.task-card.paused{opacity:.6}
+.task-icon{font-size:1.4rem;flex-shrink:0}
+.task-body{flex:1;min-width:0}
+.task-name{font-size:.88rem;font-weight:600;color:#1d1d1f;margin-bottom:2px}
+.task-desc{font-size:.75rem;color:#6e6e73;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.task-meta{display:flex;gap:10px;flex-wrap:wrap;font-size:.72rem;color:#6e6e73}
+.task-meta span{display:flex;align-items:center;gap:3px}
+.badge-active{display:inline-block;background:#d4edda;color:#155724;font-size:.65rem;font-weight:700;padding:1px 7px;border-radius:8px}
+.badge-paused{display:inline-block;background:#fff3cd;color:#856404;font-size:.65rem;font-weight:700;padding:1px 7px;border-radius:8px}
 </style>
 </head>
 <body>
@@ -461,9 +487,37 @@ input:focus{border-color:#e8002d}
     <button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:white;border:none" onclick="refreshAll()">Refresh all</button>
   </div>
 </header>
+<nav class="tab-nav">
+  <button class="tab-btn active" id="tab-btn-monitors" onclick="showTab('monitors')">Monitors</button>
+  <button class="tab-btn" id="tab-btn-tasks" onclick="showTab('tasks')">Scheduled Tasks</button>
+  <button class="tab-btn" id="tab-btn-usage" onclick="showTab('usage')">API Usage</button>
+</nav>
+<div id="panel-monitors">
 <main id="monitors-container">
   <div class="empty"><span class="spin"></span>Loading…</div>
 </main>
+</div>
+<div id="panel-tasks" style="display:none;padding:16px">
+  <div id="tasks-container"><div class="empty"><span class="spin"></span>Loading…</div></div>
+</div>
+<div id="panel-usage" style="display:none;padding:16px">
+  <div class="usage-section">
+    <h2>Token Usage &amp; Cost</h2>
+    <div class="usage-totals" id="usage-totals">
+      <div class="uc"><div class="uc-label">Total Input Tokens</div><div class="uc-val" id="ut-in">—</div></div>
+      <div class="uc"><div class="uc-label">Total Output Tokens</div><div class="uc-val" id="ut-out">—</div></div>
+      <div class="uc"><div class="uc-label">Total Cost (USD)</div><div class="uc-val" id="ut-cost">—</div></div>
+      <div class="uc"><div class="uc-label">Runs Tracked</div><div class="uc-val" id="ut-runs">—</div></div>
+    </div>
+  </div>
+  <div class="usage-section">
+    <h2>Daily Breakdown</h2>
+    <table id="usage-table">
+      <thead><tr><th>Date</th><th>Runs</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost (USD)</th></tr></thead>
+      <tbody id="usage-tbody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
 
 <script>
 let monitors = [];
@@ -891,6 +945,106 @@ async function addMonitor() {
   refreshOne(created.id);
 }
 
+// ── Tab switching ──
+function showTab(name) {
+  document.getElementById('panel-monitors').style.display = name === 'monitors' ? '' : 'none';
+  document.getElementById('panel-tasks').style.display   = name === 'tasks'    ? '' : 'none';
+  document.getElementById('panel-usage').style.display   = name === 'usage'    ? '' : 'none';
+  document.getElementById('tab-btn-monitors').classList.toggle('active', name === 'monitors');
+  document.getElementById('tab-btn-tasks').classList.toggle('active',    name === 'tasks');
+  document.getElementById('tab-btn-usage').classList.toggle('active',    name === 'usage');
+  if (name === 'usage') loadUsage();
+  if (name === 'tasks') loadTasks();
+}
+
+// ── Scheduled tasks ──
+function cronDesc(expr) {
+  if (!expr) return expr;
+  const p = expr.trim().split(/\s+/);
+  if (p.length < 5) return expr;
+  const [min, hr, , , dow] = p;
+  const days = {0:'Sun',1:'Mon',2:'Tue',3:'Wed',4:'Thu',5:'Fri',6:'Sat'};
+  function fmtHrs(h) {
+    return h.split(',').map(v => {
+      const n = parseInt(v);
+      return n === 0 ? '12am' : n < 12 ? n+'am' : n === 12 ? '12pm' : (n-12)+'pm';
+    }).join(' & ');
+  }
+  if (dow !== '*') {
+    const dayName = days[parseInt(dow)] || 'day '+dow;
+    return 'Weekly ' + dayName + ' at ' + fmtHrs(hr);
+  }
+  return 'Daily at ' + fmtHrs(hr);
+}
+
+function taskIcon(name) {
+  if (/flight|monitor|seat|award/i.test(name)) return '✈';
+  if (/point|sale|promot/i.test(name)) return '🎯';
+  return '⏰';
+}
+
+async function loadTasks() {
+  const r = await fetch('/api/scheduled-tasks');
+  const tasks = await r.json();
+  const el = document.getElementById('tasks-container');
+  if (!tasks.length) { el.innerHTML = '<div class="empty">No scheduled tasks found.</div>'; return; }
+  el.innerHTML = tasks.map(t => {
+    const badge = t.status === 'active'
+      ? '<span class="badge-active">Active</span>'
+      : '<span class="badge-paused">Paused</span>';
+    const sched = t.scheduleDisplay || cronDesc(t.scheduleValue || t.schedule_value || '');
+    const nextRun = t.next_run ? fmtDt(t.next_run) : '—';
+    const desc = t.description || (t.prompt ? t.prompt.slice(0, 100) + '…' : '');
+    const name = t.name || t.id;
+    return '<div class="task-card' + (t.status === 'paused' ? ' paused' : '') + '">' +
+      '<div class="task-icon">' + taskIcon(name) + '</div>' +
+      '<div class="task-body">' +
+        '<div class="task-name">' + name + ' ' + badge + '</div>' +
+        '<div class="task-desc">' + desc + '</div>' +
+        '<div class="task-meta">' +
+          '<span>🕐 ' + sched + '</span>' +
+          '<span>⏭ Next: ' + nextRun + '</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// ── Usage ──
+async function loadUsage() {
+  const r = await fetch('/api/usage');
+  const data = await r.json();
+  const runs = data.runs || [];
+  const totals = data.totals || {};
+
+  document.getElementById('ut-in').textContent = (totals.inputTokens || 0).toLocaleString();
+  document.getElementById('ut-out').textContent = (totals.outputTokens || 0).toLocaleString();
+  document.getElementById('ut-cost').textContent = '$' + (totals.costUsd || 0).toFixed(4);
+  document.getElementById('ut-runs').textContent = runs.length.toLocaleString();
+
+  // Group by date
+  const byDay = {};
+  for (const run of runs) {
+    const d = run.date || (run.timestamp ? run.timestamp.slice(0,10) : 'unknown');
+    if (!byDay[d]) byDay[d] = {runs:0,in:0,out:0,cost:0};
+    byDay[d].runs++;
+    byDay[d].in  += run.inputTokens  || 0;
+    byDay[d].out += run.outputTokens || 0;
+    byDay[d].cost += run.costUsd     || 0;
+  }
+  const days = Object.keys(byDay).sort().reverse();
+  const tbody = document.getElementById('usage-tbody');
+  if (days.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">No usage recorded yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = days.map(d => {
+    const v = byDay[d];
+    return '<tr><td>' + d + '</td><td>' + v.runs + '</td><td>' + v.in.toLocaleString() +
+           '</td><td>' + v.out.toLocaleString() + '</td><td>$' + v.cost.toFixed(4) + '</td></tr>';
+  }).join('');
+}
+
 init();
 </script>
 </body>
@@ -1015,6 +1169,34 @@ const server = http.createServer(async (req, res) => {
       data.monitors = data.monitors.filter(m => m.id !== id);
       writeMonitors(data);
       return respond(res, 200, '{"ok":true}');
+    }
+
+    // GET /api/scheduled-tasks — merge IPC snapshot (source of truth) with metadata file
+    if (parts[0]==='api' && parts[1]==='scheduled-tasks' && method==='GET') {
+      try {
+        const raw: {id:string;groupFolder:string;prompt:string;schedule_type:string;schedule_value:string;status:string;next_run:string|null}[] =
+          fs.existsSync(TASKS_FILE) ? JSON.parse(fs.readFileSync(TASKS_FILE, 'utf-8')) : [];
+        // Load optional metadata (human-readable names/descriptions from Weon)
+        type TaskMeta = {id:string;name:string;description:string;scheduleDisplay:string;status:string};
+        let meta: TaskMeta[] = [];
+        try { meta = JSON.parse(fs.readFileSync(TASKS_META_FILE, 'utf-8')).tasks || []; } catch { /* ignore */ }
+        const metaById = Object.fromEntries(meta.map(m => [m.id, m]));
+        const merged = raw.map(t => ({
+          ...t,
+          name: metaById[t.id]?.name || null,
+          description: metaById[t.id]?.description || null,
+          scheduleDisplay: metaById[t.id]?.scheduleDisplay || null,
+        }));
+        return respond(res, 200, JSON.stringify(merged));
+      } catch { return respond(res, 200, '[]'); }
+    }
+
+    // GET /api/usage
+    if (parts[0]==='api' && parts[1]==='usage' && method==='GET') {
+      try {
+        const raw = fs.existsSync(USAGE_FILE) ? fs.readFileSync(USAGE_FILE, 'utf-8') : '{"runs":[],"totals":{"inputTokens":0,"outputTokens":0,"costUsd":0}}';
+        return respond(res, 200, raw);
+      } catch { return respond(res, 200, '{"runs":[],"totals":{"inputTokens":0,"outputTokens":0,"costUsd":0}}'); }
     }
 
     respond(res, 404, '{"error":"Not found"}');

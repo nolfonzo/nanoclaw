@@ -10,7 +10,8 @@ docker run -d \
   --name nanoclaw-dashboard \
   --restart always \
   -p 3001:3001 \
-  -v /home/nolfonzo/andy:/workspace/extra/andy \
+  -v /home/nolfonzo/weon:/workspace/extra/weon \
+  -v /home/nolfonzo/nanoclaw/data/ipc/main:/workspace/nanoclaw-ipc:ro \
   nanoclaw-dashboard:latest
 
 echo "Dashboard running → http://100.114.240.29:3001"

@@ -35,6 +35,8 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 interface SessionEntry {
@@ -390,6 +392,8 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -476,12 +480,25 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      const usage = (message as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+      if (usage) {
+        totalInputTokens += usage.input_tokens || 0;
+        totalOutputTokens += usage.output_tokens || 0;
+      }
+      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''} tokens=${totalInputTokens}in/${totalOutputTokens}out`);
+      // Stop IPC polling before ending the stream to prevent a race where
+      // a piped message sneaks in and triggers session replay.
+      ipcPolling = false;
       writeOutput({
         status: 'success',
         result: textResult || null,
-        newSessionId
+        newSessionId,
+        inputTokens: totalInputTokens || undefined,
+        outputTokens: totalOutputTokens || undefined,
       });
+      // End the stream so the for-await loop completes after this result.
+      // Follow-up IPC messages are handled by the outer loop as fresh queries.
+      stream.end();
     }
   }
 
@@ -548,6 +565,11 @@ async function main(): Promise<void> {
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
+      // Always start the next IPC-loop query fresh — no session resume.
+      // Context is provided via the prompt text (SQLite history injected by the host).
+      // Resuming causes O(n²) token cost as the session transcript grows.
+      sessionId = undefined;
+      resumeAt = undefined;
 
       // If _close was consumed during the query, exit immediately.
       // Don't emit a session-update marker (it would reset the host's

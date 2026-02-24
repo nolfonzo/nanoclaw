@@ -1,3 +1,5 @@
+import https from 'https';
+
 import { Bot } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
@@ -30,10 +32,19 @@ export class TelegramChannel implements Channel {
   private consecutiveErrors = 0;
   private static readonly MAX_MESSAGE_CHUNKS = 10; // ~40KB max per send
   private static readonly CHUNK_DELAY_MS = 500;    // stay well under 30 msg/sec rate limit
+  private static readonly SEND_RETRIES = 3;
+  private static readonly SEND_RETRY_DELAY_MS = 2000;
 
   async connect(): Promise<void> {
+    // Force IPv4 at the socket level — IPv6 connectivity to api.telegram.org
+    // is broken on this network, and grammy's connection pool caches IPv6
+    // addresses regardless of dns.setDefaultResultOrder().
+    const ipv4Agent = new https.Agent({ family: 4 });
     this.bot = new Bot(this.botToken, {
-      client: { timeoutSeconds: 30 },  // timeout all API calls at 30s
+      client: {
+        timeoutSeconds: 30,
+        baseFetchConfig: { agent: ipv4Agent },
+      },
     });
 
     // Command to get chat ID (useful for registration)
@@ -196,6 +207,23 @@ export class TelegramChannel implements Channel {
     });
   }
 
+  private async sendWithRetry(numericId: string, text: string): Promise<void> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= TelegramChannel.SEND_RETRIES; attempt++) {
+      try {
+        await this.bot!.api.sendMessage(numericId, text);
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < TelegramChannel.SEND_RETRIES) {
+          logger.warn({ attempt, err: (err as Error).message }, 'Telegram sendMessage failed, retrying');
+          await new Promise(r => setTimeout(r, TelegramChannel.SEND_RETRY_DELAY_MS));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
@@ -208,7 +236,7 @@ export class TelegramChannel implements Channel {
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
-        await this.bot.api.sendMessage(numericId, text);
+        await this.sendWithRetry(numericId, text);
       } else {
         const chunks: string[] = [];
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
@@ -219,16 +247,16 @@ export class TelegramChannel implements Channel {
           chunks.splice(TelegramChannel.MAX_MESSAGE_CHUNKS);
         }
         for (const chunk of chunks) {
-          await this.bot.api.sendMessage(numericId, chunk);
+          await this.sendWithRetry(numericId, chunk);
           if (chunks.indexOf(chunk) < chunks.length - 1) {
             await new Promise(r => setTimeout(r, TelegramChannel.CHUNK_DELAY_MS));
           }
         }
       }
-      this.consecutiveErrors = 0; // reset on successful send
+      this.consecutiveErrors = 0;
       logger.info({ jid, length: text.length }, 'Telegram message sent');
     } catch (err) {
-      logger.error({ jid, err }, 'Failed to send Telegram message');
+      logger.error({ jid, err }, 'Failed to send Telegram message after retries');
     }
   }
 
