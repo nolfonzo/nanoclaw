@@ -338,6 +338,16 @@ function respond(res: http.ServerResponse, status: number, body: string, type = 
   res.end(body);
 }
 
+const MAX_DATE_RANGE_DAYS_SERVER = 5;
+
+function validateLegDateRange(leg: { dateFrom?: string; dateTo?: string } | undefined, label: string): string | null {
+  if (!leg?.dateFrom || !leg?.dateTo) return null;
+  const days = (new Date(leg.dateTo).getTime() - new Date(leg.dateFrom).getTime()) / 86_400_000;
+  if (days < 0) return `${label}: end date must be after start date`;
+  if (days > MAX_DATE_RANGE_DAYS_SERVER) return `${label}: date range cannot exceed ${MAX_DATE_RANGE_DAYS_SERVER} days`;
+  return null;
+}
+
 const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1 MB
 
 async function readBody(req: http.IncomingMessage): Promise<string> {
@@ -783,6 +793,8 @@ async function saveEdit(id) {
     alert('Please fill in all fields.');
     return;
   }
+  const rangeErr = validateDateRange(outFrom, outTo, 'Outbound') || validateDateRange(retFrom, retTo, 'Return');
+  if (rangeErr) { alert(rangeErr); return; }
 
   const body = {label, cabins, source, availType,
     outbound: {origin:outOrig, destination:outDest, dateFrom:outFrom, dateTo:outTo},
@@ -820,6 +832,16 @@ function toggleSingleDate(el) {
   }
 }
 
+const MAX_DATE_RANGE_DAYS = 5;
+
+function validateDateRange(from, to, label) {
+  if (!from || !to) return null;
+  const days = (new Date(to) - new Date(from)) / 86400000;
+  if (days < 0) return label + ': end date must be after start date.';
+  if (days > MAX_DATE_RANGE_DAYS) return label + ': date range cannot exceed ' + MAX_DATE_RANGE_DAYS + ' days.';
+  return null;
+}
+
 function syncSingle(el) {
   const prefix = el.dataset.syncSingle;
   if (!prefix) return;
@@ -854,6 +876,8 @@ async function addMonitor() {
     alert('Please fill in all fields and select at least one cabin.');
     return;
   }
+  const rangeErr = validateDateRange(outFrom, outTo, 'Outbound') || validateDateRange(retFrom, retTo, 'Return');
+  if (rangeErr) { alert(rangeErr); return; }
 
   const body = {label, cabins, source, availType,
     outbound: {origin:outOrig, destination:outDest, dateFrom:outFrom, dateTo:outTo},
@@ -894,6 +918,8 @@ const server = http.createServer(async (req, res) => {
     // POST /api/monitors  (create)
     if (parts[0]==='api' && parts[1]==='monitors' && !parts[2] && method==='POST') {
       const body = JSON.parse(await readBody(req));
+      const rangeErr = validateLegDateRange(body.outbound, 'Outbound') ?? validateLegDateRange(body.return, 'Return');
+      if (rangeErr) return respond(res, 400, JSON.stringify({ error: rangeErr }));
       const monitor: Monitor = {
         id: crypto.randomUUID(),
         label: body.label,
@@ -914,6 +940,8 @@ const server = http.createServer(async (req, res) => {
     if (parts[0]==='api' && parts[1]==='monitors' && parts[2] && !parts[3] && method==='PUT') {
       const id = parts[2];
       const body = JSON.parse(await readBody(req));
+      const rangeErr = validateLegDateRange(body.outbound, 'Outbound') ?? validateLegDateRange(body.return, 'Return');
+      if (rangeErr) return respond(res, 400, JSON.stringify({ error: rangeErr }));
       const data = readMonitors();
       const monitor = data.monitors.find(m => m.id === id);
       if (!monitor) return respond(res, 404, '{"error":"Not found"}');
