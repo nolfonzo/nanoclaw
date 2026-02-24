@@ -302,6 +302,14 @@ export async function runContainerAgent(
       // Stream-parse for output markers
       if (onOutput) {
         parseBuffer += chunk;
+        // Safety: if parseBuffer grows too large without a complete marker pair
+        // (e.g. container emitting massive output without markers), clear it to
+        // prevent OOM. Keep any partial START marker at the tail.
+        if (parseBuffer.length > CONTAINER_MAX_OUTPUT_SIZE) {
+          logger.warn({ group: group.name, size: parseBuffer.length }, 'Parse buffer overflow, clearing');
+          const lastStart = parseBuffer.lastIndexOf(OUTPUT_START_MARKER);
+          parseBuffer = lastStart !== -1 ? parseBuffer.slice(lastStart) : '';
+        }
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
           const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);

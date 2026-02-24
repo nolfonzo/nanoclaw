@@ -211,13 +211,21 @@ function normalizeFlights(raw: Record<string, unknown>[], cabins: string[], avai
   return result.sort((a, b) => a.Date.localeCompare(b.Date));
 }
 
+const FETCH_TIMEOUT_MS = 30_000; // 30 seconds
+
 async function fetchLeg(leg: Leg, cabins: string[], availType: 'rewards' | 'any' = 'rewards'): Promise<NormalizedFlight[]> {
   const key = readKey();
   const url = `https://seats.aero/partnerapi/search?origin_airport=${leg.origin}&destination_airport=${leg.destination}&sources=qantas&cabins=economy,premium,business,first&start_date=${leg.dateFrom}&end_date=${leg.dateTo}&order_by=lowest_mileage&take=500`;
-  const resp = await fetch(url, { headers: { 'Partner-Authorization': key } });
-  if (!resp.ok) throw new Error(`seats.aero ${resp.status}: ${await resp.text()}`);
-  const data = (await resp.json()) as { data?: Record<string, unknown>[] };
-  return normalizeFlights(data.data ?? [], cabins, availType);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, { headers: { 'Partner-Authorization': key }, signal: controller.signal });
+    if (!resp.ok) throw new Error(`seats.aero ${resp.status}: ${await resp.text()}`);
+    const data = (await resp.json()) as { data?: Record<string, unknown>[] };
+    return normalizeFlights(data.data ?? [], cabins, availType);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ── Refresh logic ──────────────────────────────────────────────
@@ -330,10 +338,18 @@ function respond(res: http.ServerResponse, status: number, body: string, type = 
   res.end(body);
 }
 
+const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1 MB
+
 async function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', chunk => { data += chunk; });
+    req.on('data', chunk => {
+      data += chunk;
+      if (data.length > MAX_BODY_SIZE) {
+        req.destroy();
+        reject(new Error('Request body too large'));
+      }
+    });
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });

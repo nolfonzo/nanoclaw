@@ -40,6 +40,7 @@ export class WhatsAppChannel implements Channel {
   private consecutiveFailures = 0;
   private static readonly MAX_RECONNECT_DELAY = 5 * 60 * 1000; // 5 minutes
   private static readonly MAX_CONSECUTIVE_FAILURES = 20;
+  private static readonly MAX_OUTGOING_QUEUE_SIZE = 100;
 
   private opts: WhatsAppChannelOpts;
 
@@ -56,6 +57,16 @@ export class WhatsAppChannel implements Channel {
   private async connectInternal(onFirstOpen?: () => void): Promise<void> {
     const authDir = path.join(STORE_DIR, 'auth');
     fs.mkdirSync(authDir, { recursive: true });
+
+    // Remove all listeners from the previous socket before creating a new one.
+    // Prevents stale handlers from firing on the old socket and causing duplicate
+    // reconnect attempts or incorrect state updates.
+    if (this.sock) {
+      // Cast to base EventEmitter to call removeAllListeners() without an event name arg.
+      // Baileys' typed overload requires an event name, but we want to clear everything
+      // so stale handlers on the old socket don't interfere after we create the new one.
+      (this.sock.ev as unknown as { removeAllListeners(): void }).removeAllListeners();
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
@@ -223,8 +234,7 @@ export class WhatsAppChannel implements Channel {
       : `${ASSISTANT_NAME}: ${text}`;
 
     if (!this.connected) {
-      this.outgoingQueue.push({ jid, text: prefixed });
-      logger.info({ jid, length: prefixed.length, queueSize: this.outgoingQueue.length }, 'WA disconnected, message queued');
+      this.enqueueOutgoing(jid, prefixed, 'WA disconnected, message queued');
       return;
     }
     try {
@@ -232,7 +242,7 @@ export class WhatsAppChannel implements Channel {
       logger.info({ jid, length: prefixed.length }, 'Message sent');
     } catch (err) {
       // If send fails, queue it for retry on reconnect
-      this.outgoingQueue.push({ jid, text: prefixed });
+      this.enqueueOutgoing(jid, prefixed, 'Failed to send, message queued');
       logger.warn({ jid, err, queueSize: this.outgoingQueue.length }, 'Failed to send, message queued');
     }
   }
@@ -321,6 +331,15 @@ export class WhatsAppChannel implements Channel {
     }
 
     return jid;
+  }
+
+  private enqueueOutgoing(jid: string, text: string, logMsg: string): void {
+    if (this.outgoingQueue.length >= WhatsAppChannel.MAX_OUTGOING_QUEUE_SIZE) {
+      const dropped = this.outgoingQueue.shift();
+      logger.warn({ jid: dropped?.jid, queueSize: this.outgoingQueue.length }, 'Outgoing queue full, dropping oldest message');
+    }
+    this.outgoingQueue.push({ jid, text });
+    logger.info({ jid, length: text.length, queueSize: this.outgoingQueue.length }, logMsg);
   }
 
   private async flushOutgoingQueue(): Promise<void> {

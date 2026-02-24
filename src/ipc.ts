@@ -41,6 +41,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  const MAX_ERROR_FILES = 100;
+  let ipcConsecutiveErrors = 0;
+  const MAX_IPC_ERROR_BACKOFF_MS = 60_000; // 1 minute
+
   const processIpcFiles = async () => {
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
@@ -49,9 +53,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
         const stat = fs.statSync(path.join(ipcBaseDir, f));
         return stat.isDirectory() && f !== 'errors';
       });
+      ipcConsecutiveErrors = 0;
     } catch (err) {
-      logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      ipcConsecutiveErrors++;
+      const backoff = Math.min(IPC_POLL_INTERVAL * Math.pow(2, ipcConsecutiveErrors - 1), MAX_IPC_ERROR_BACKOFF_MS);
+      logger.error({ err, consecutiveErrors: ipcConsecutiveErrors, backoffMs: backoff }, 'Error reading IPC base directory');
+      setTimeout(processIpcFiles, backoff);
       return;
     }
 
@@ -99,6 +106,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
+              try {
+                const errorFiles = fs.readdirSync(errorDir).sort();
+                if (errorFiles.length >= MAX_ERROR_FILES) {
+                  fs.unlinkSync(path.join(errorDir, errorFiles[0]));
+                }
+              } catch {}
               fs.renameSync(
                 filePath,
                 path.join(errorDir, `${sourceGroup}-${file}`),
@@ -133,6 +146,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
               );
               const errorDir = path.join(ipcBaseDir, 'errors');
               fs.mkdirSync(errorDir, { recursive: true });
+              try {
+                const errorFiles = fs.readdirSync(errorDir).sort();
+                if (errorFiles.length >= MAX_ERROR_FILES) {
+                  fs.unlinkSync(path.join(errorDir, errorFiles[0]));
+                }
+              } catch {}
               fs.renameSync(
                 filePath,
                 path.join(errorDir, `${sourceGroup}-${file}`),

@@ -315,6 +315,9 @@ async function startMessageLoop(): Promise<void> {
 
   logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
 
+  let consecutiveErrors = 0;
+  const MAX_LOOP_ERROR_BACKOFF_MS = 30_000;
+
   while (true) {
     try {
       const jids = Object.keys(registeredGroups);
@@ -390,8 +393,13 @@ async function startMessageLoop(): Promise<void> {
           }
         }
       }
+      consecutiveErrors = 0;
     } catch (err) {
-      logger.error({ err }, 'Error in message loop');
+      consecutiveErrors++;
+      const backoff = Math.min(POLL_INTERVAL * Math.pow(2, consecutiveErrors - 1), MAX_LOOP_ERROR_BACKOFF_MS);
+      logger.error({ err, consecutiveErrors, backoffMs: backoff }, 'Error in message loop');
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+      continue;
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
   }

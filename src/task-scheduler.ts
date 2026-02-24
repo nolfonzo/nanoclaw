@@ -213,6 +213,9 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
   schedulerRunning = true;
   logger.info('Scheduler loop started');
 
+  let consecutiveErrors = 0;
+  const MAX_SCHEDULER_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+
   const loop = async () => {
     try {
       const dueTasks = getDueTasks();
@@ -233,8 +236,13 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
           () => runTask(currentTask, deps),
         );
       }
+      consecutiveErrors = 0;
     } catch (err) {
-      logger.error({ err }, 'Error in scheduler loop');
+      consecutiveErrors++;
+      const backoff = Math.min(SCHEDULER_POLL_INTERVAL * Math.pow(2, consecutiveErrors - 1), MAX_SCHEDULER_BACKOFF_MS);
+      logger.error({ err, consecutiveErrors, backoffMs: backoff }, 'Error in scheduler loop');
+      setTimeout(loop, backoff);
+      return;
     }
 
     setTimeout(loop, SCHEDULER_POLL_INTERVAL);
