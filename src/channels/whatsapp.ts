@@ -36,6 +36,10 @@ export class WhatsAppChannel implements Channel {
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
   private groupSyncTimerStarted = false;
+  private reconnectDelay = 1000;
+  private consecutiveFailures = 0;
+  private static readonly MAX_RECONNECT_DELAY = 5 * 60 * 1000; // 5 minutes
+  private static readonly MAX_CONSECUTIVE_FAILURES = 20;
 
   private opts: WhatsAppChannelOpts;
 
@@ -85,21 +89,27 @@ export class WhatsAppChannel implements Channel {
         logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length }, 'Connection closed');
 
         if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures >= WhatsAppChannel.MAX_CONSECUTIVE_FAILURES) {
+            logger.error({ consecutiveFailures: this.consecutiveFailures }, 'Too many consecutive reconnect failures — giving up. Restart nanoclaw manually.');
+            process.exit(1);
+          }
+          const delay = this.reconnectDelay;
+          this.reconnectDelay = Math.min(this.reconnectDelay * 2, WhatsAppChannel.MAX_RECONNECT_DELAY);
+          logger.info({ delay, attempt: this.consecutiveFailures }, 'Reconnecting...');
+          setTimeout(() => {
+            this.connectInternal().catch((err) => {
+              logger.error({ err }, 'Failed to reconnect');
+            });
+          }, delay);
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectDelay = 1000;
+        this.consecutiveFailures = 0;
         logger.info('Connected to WhatsApp');
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
