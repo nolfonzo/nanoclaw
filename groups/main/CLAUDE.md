@@ -226,9 +226,123 @@ The task will run in that group's context with access to their files and memory.
 
 ## Qantas Flight Monitoring
 
-The dashboard (`nanoclaw-dashboard`) handles award seat checking via seats.aero (hourly) and tracks combined round-trip prices. Your role is to deliver alerts, send first-run notifications, and handle cash price requests.
+The dashboard (`nanoclaw-dashboard`) handles award seat checking via seats.aero (hourly) and tracks combined round-trip prices. Your role is to deliver alerts, send first-run notifications, and handle cash price requests via the `fast-flights` Python library.
 
 All files are at `/workspace/extra/weon/qantas-monitor/`.
+
+### On-demand award availability checks
+
+When the user asks you to check award seat availability for a route and dates (e.g. "check SYD to BOS in June"), use the seats.aero API directly — do NOT use agent-browser for this. It's fast, reliable, and returns the same data the dashboard uses.
+
+Get the API key from the project env:
+```bash
+grep SEATS_AERO_API_KEY /workspace/project/.env | cut -d= -f2
+```
+
+Then query the API:
+```bash
+curl -s "https://seats.aero/partnerapi/search?origin_airport=SYD&destination_airport=BOS&sources=qantas&cabins=economy,premium,business,first&start_date=2026-06-08&end_date=2026-06-09&order_by=lowest_mileage&take=50" \
+  -H "Partner-Authorization: <key>"
+```
+
+Parameters:
+- `origin_airport` / `destination_airport`: IATA codes
+- `start_date` / `end_date`: date range to search
+- `sources=qantas`: Qantas-operated flights only
+- `cabins`: comma-separated list (`economy`, `premium`, `business`, `first`)
+- `order_by=lowest_mileage`: cheapest first
+
+Each result in `data[]` has: `Date`, `Origin`, `Destination`, `YAvailable`, `WAvailable`, `JAvailable`, `FAvailable`, `YMileageCost`, `WMileageCost`, `JMileageCost`, `FMileageCost`, `Source` (direct vs connecting).
+
+Report results in a clean message. If nothing found, say so clearly. Always check both outbound and return legs separately.
+
+### On-demand cash price checks
+
+**Rule: specific dates → SerpApi. Date ranges to sample → fast-flights.**
+
+- SerpApi returns real round-trip fares accurately. Use it whenever the user gives you specific dates.
+- fast-flights sums one-way legs and can diverge significantly from the real round-trip fare on specific dates, but is fine for finding the cheapest window across a range.
+
+**SerpApi (specific dates):**
+
+Get the key: `grep SERPAPI_KEY /workspace/project/.env | cut -d= -f2`
+
+```bash
+KEY=$(grep SERPAPI_KEY /workspace/project/.env | cut -d= -f2)
+
+# Round-trip (type=1), premium economy (travel_class=2)
+curl -s "https://serpapi.com/search.json?engine=google_flights\
+&departure_id=SYD&arrival_id=BOS\
+&outbound_date=2026-06-09&return_date=2026-07-15\
+&currency=AUD&travel_class=2&type=1&adults=1\
+&api_key=$KEY" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+if 'error' in data:
+    print('ERROR:', data['error']); sys.exit(1)
+for f in data.get('best_flights', []) + data.get('other_flights', []):
+    legs = f.get('flights', [])
+    airline = ', '.join(dict.fromkeys(l['airline'] for l in legs))
+    dep = legs[0]['departure_airport']['time']
+    arr = legs[-1]['arrival_airport']['time']
+    via = [l['id'] for l in f.get('layovers', [])]
+    dur = f['total_duration']
+    print(f\"A\${f['price']} | {airline} | {dep}→{arr} | {len(legs)-1} stop via {via} | {dur//60}h{dur%60}m\")
+"
+```
+
+Parameters:
+- `departure_id` / `arrival_id`: IATA airport codes
+- `outbound_date` / `return_date`: YYYY-MM-DD (omit `return_date` and set `type=2` for one-way)
+- `travel_class`: `1`=economy, `2`=premium economy, `3`=business, `4`=first
+- `type`: `1`=round trip, `2`=one-way
+- `include_airlines`: e.g. `QF` to filter to Qantas only (comma-separated IATA codes)
+
+Free plan: 100 searches/month — use for user queries only, not scheduled runs.
+
+**fast-flights (date range sampling — find cheapest window):**
+
+```bash
+python3 << 'EOF'
+from fast_flights import FlightData, Passengers, TFSData
+from fast_flights.core import get_flights_from_filter
+from datetime import date, timedelta
+
+def cheapest_in_range(origin, dest, date_from, date_to, seat, step=7):
+    best = None
+    d = date.fromisoformat(date_from)
+    while d <= date.fromisoformat(date_to):
+        try:
+            r = get_flights_from_filter(
+                TFSData.from_interface(
+                    flight_data=[FlightData(date=d.isoformat(), from_airport=origin, to_airport=dest)],
+                    trip="one-way", seat=seat, passengers=Passengers(adults=1),
+                ),
+                currency="AUD", mode="fallback",
+            )
+            for f in r.flights:
+                try:
+                    price = float(f.price.replace("A$","").replace(",",""))
+                    if best is None or price < best[0]:
+                        best = (price, d.isoformat(), f.name, f.stops == 0)
+                except ValueError:
+                    pass
+        except Exception as e:
+            print(f"  {d}: {e}")
+        d += timedelta(days=step)
+    return best  # (price, date, airline, is_direct)
+
+# Example — one-way per leg, sum for round-trip estimate
+seat = "premium-economy"
+ob = cheapest_in_range("SYD", "BOS", "2026-06-01", "2026-06-30", seat)
+rt = cheapest_in_range("BOS", "SYD", "2026-07-01", "2026-07-31", seat)
+if ob: print(f"Out cheapest: A${ob[0]:.0f} on {ob[1]} ({ob[2]}, {'direct' if ob[3] else '1+ stop'})")
+if rt: print(f"Ret cheapest: A${rt[0]:.0f} on {rt[1]} ({rt[2]}, {'direct' if rt[3] else '1+ stop'})")
+if ob and rt: print(f"Combined estimate: A${ob[0]+rt[0]:.0f} (one-way sum — verify exact round-trip with SerpApi)")
+EOF
+```
+
+Seat options: `"economy"`, `"premium-economy"`, `"business"`, `"first"`.
 
 ### Step 1: Deliver pending alerts
 
@@ -285,11 +399,15 @@ Then add the monitor's `id` to `first-notified.json` and save it.
 
 ### Step 3: Qantas points sales
 
-Check `https://www.qantas.com/au/en/frequent-flyer/points/buy-points.html` using agent-browser. A points sale = discounted rate to buy/transfer points (e.g. 15–20% bonus). Notify immediately if a new sale is found. Track in `/workspace/extra/weon/qantas-monitor/points-sale.json`.
+Check for points sale announcements from two sources using agent-browser:
+1. **Qantas Newsroom** (`https://www.qantasnewsroom.com.au/`): Scan the homepage for any recent articles mentioning "buy points", "bonus points", "points sale", or "purchase points".
+2. **AFF** (`https://www.australianfrequentflyer.com.au/latest-news/`): Look for announcements about points sales or bonus point offers.
+
+A points sale = discounted rate or bonus to buy/transfer points (e.g. 15–20% bonus on purchases). Notify immediately if a new sale is found. Track in `/workspace/extra/weon/qantas-monitor/points-sale.json`.
 
 ### Step 4: Cash price requests
 
-The dashboard writes cash price requests to `cash-requests.json`. Check this file on every run. If it has entries, process each one using agent-browser.
+The dashboard writes cash price requests to `cash-requests.json`. Check this file on every run. Each request has date ranges (not specific dates), so use **fast-flights** to sample weekly dates across each range and find the cheapest window.
 
 **Request format:**
 ```json
@@ -305,12 +423,98 @@ The dashboard writes cash price requests to `cash-requests.json`. Check this fil
 ]
 ```
 
-**How to check prices using agent-browser:**
-1. Open Google Flights: `agent-browser open https://www.google.com/travel/flights`
-2. Search for the route and date range (use the "Cheapest" sort)
-3. Filter results to Qantas-operated flights only
-4. For each cabin in the request, find the cheapest Qantas fare within the date range
-5. Note the date, price (AUD), and whether it's direct
+For each cabin: use fast-flights to sample weekly dates and find the cheapest outbound and return dates, then confirm the actual round-trip price for those dates with SerpApi.
+
+```bash
+python3 << 'EOF'
+import json, subprocess
+from fast_flights import FlightData, Passengers, TFSData
+from fast_flights.core import get_flights_from_filter
+from datetime import date, timedelta, datetime, timezone
+
+SERPAPI_KEY = open('/dev/stdin').readline().strip() if False else \
+    subprocess.check_output("grep SERPAPI_KEY /workspace/project/.env | cut -d= -f2", shell=True).decode().strip()
+
+CABIN_MAP = {"economy": "economy", "premium": "premium-economy", "business": "business", "first": "first"}
+TRAVEL_CLASS = {"economy": 1, "premium": 2, "business": 3, "first": 4}
+
+def cheapest_date(origin, dest, date_from, date_to, cabin, step=7):
+    """Use fast-flights to find the cheapest date in a range (one-way per leg)."""
+    seat = CABIN_MAP.get(cabin, "economy")
+    best = None
+    d = date.fromisoformat(date_from)
+    while d <= date.fromisoformat(date_to):
+        try:
+            r = get_flights_from_filter(
+                TFSData.from_interface(
+                    flight_data=[FlightData(date=d.isoformat(), from_airport=origin, to_airport=dest)],
+                    trip="one-way", seat=seat, passengers=Passengers(adults=1),
+                ),
+                currency="AUD", mode="fallback",
+            )
+            for f in r.flights:
+                try:
+                    price = float(f.price.replace("A$","").replace(",",""))
+                    if best is None or price < best[0]:
+                        best = (price, d.isoformat())
+                except ValueError:
+                    pass
+        except Exception as e:
+            print(f"  fast-flights error {d}: {e}")
+        d += timedelta(days=step)
+    return best  # (approx_price, date)
+
+def serpapi_roundtrip(origin, dest, outbound_date, return_date, cabin):
+    """Confirm exact round-trip price for specific dates via SerpApi."""
+    tc = TRAVEL_CLASS.get(cabin, 1)
+    url = (f"https://serpapi.com/search.json?engine=google_flights"
+           f"&departure_id={origin}&arrival_id={dest}"
+           f"&outbound_date={outbound_date}&return_date={return_date}"
+           f"&currency=AUD&travel_class={tc}&type=1&adults=1&api_key={SERPAPI_KEY}")
+    result = subprocess.check_output(["curl", "-s", url]).decode()
+    data = json.loads(result)
+    if 'error' in data:
+        print(f"  SerpApi error: {data['error']}")
+        return None
+    flights = data.get('best_flights', []) + data.get('other_flights', [])
+    if not flights:
+        return None
+    best = min(flights, key=lambda f: f['price'])
+    legs = best['flights']
+    airline = ', '.join(dict.fromkeys(l['airline'] for l in legs))
+    is_direct = len(legs) == 1
+    print(f"  SerpApi confirmed: A${best['price']} ({airline}, {'direct' if is_direct else str(len(legs)-1)+' stop'})")
+    return best['price'], is_direct
+
+# Replace with values from cash-requests.json
+ORIGIN, DEST = "SYD", "SCL"
+OB_FROM, OB_TO = "2026-04-01", "2026-04-30"
+RT_FROM, RT_TO = "2026-05-01", "2026-05-31"
+cabins = ["business", "premium"]
+
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+results = {}
+for cabin in cabins:
+    print(f"\n--- {cabin} ---")
+    ob = cheapest_date(ORIGIN, DEST, OB_FROM, OB_TO, cabin)
+    rt = cheapest_date(DEST, ORIGIN, RT_FROM, RT_TO, cabin)
+    if not ob or not rt:
+        print(f"  No results found")
+        continue
+    print(f"  fast-flights cheapest: out {ob[1]} (~A${ob[0]:.0f}), ret {rt[1]} (~A${rt[0]:.0f})")
+    confirmed = serpapi_roundtrip(ORIGIN, DEST, ob[1], rt[1], cabin)
+    if confirmed:
+        price, is_direct = confirmed
+        results[cabin] = {"aud": price, "outboundDate": ob[1], "returnDate": rt[1],
+                          "isDirect": is_direct, "seenAt": now}
+    else:
+        # Fall back to fast-flights sum if SerpApi fails
+        results[cabin] = {"aud": round(ob[0] + rt[0]), "outboundDate": ob[1], "returnDate": rt[1],
+                          "isDirect": False, "seenAt": now}
+
+print("\nResults:", json.dumps(results, indent=2))
+EOF
+```
 
 **Write results to** `cash-results.json`:
 ```json
@@ -327,6 +531,21 @@ The dashboard writes cash price requests to `cash-requests.json`. Check this fil
 ```
 
 After writing results, clear `cash-requests.json` (write `[]`). The dashboard polls every 30 seconds.
+
+### Step 5: Deliver cash price alerts immediately
+
+After Step 4, wait for the dashboard to process the results and generate alerts, then deliver them in the same session rather than waiting until the next 3am run.
+
+```bash
+sleep 60
+ALERTS=$(cat /workspace/extra/weon/qantas-monitor/alerts-pending.json 2>/dev/null || echo '[]')
+if [ "$ALERTS" != "[]" ] && [ "$ALERTS" != "" ]; then
+  echo "$ALERTS"
+  echo '[]' > /workspace/extra/weon/qantas-monitor/alerts-pending.json
+fi
+```
+
+Parse the alerts and send them exactly as in Step 1. Only run Step 5 if Step 4 actually processed any cash requests (i.e. `cash-requests.json` was non-empty when you started).
 
 ---
 
@@ -359,7 +578,7 @@ Read `monitors.json` and summarise each monitor: label, route, dates, cabins, so
 
 Field notes:
 - `cabins`: any of `"business"`, `"premium"`, `"economy"`, `"first"`
-- `source`: `"awards"` (seats.aero) or `"cash"` (Google Flights via agent-browser)
+- `source`: `"awards"` (seats.aero) or `"cash"` (Google Flights via fast-flights)
 - `availType`: `"any"` (includes Points+Pay) or `"rewards"` (classic award seats only) — awards monitors only
 - `dateFrom`/`dateTo`: if the user gives a single date, set both to that date
 
@@ -390,57 +609,5 @@ Field notes:
 
 ## Qantas Frequent Flyer Account
 
-**Only access this when the user explicitly asks** — do NOT check the QFF account during scheduled monitoring runs or proactively. Wait for a direct request like "check my points" or "log in to my Qantas account".
+**Do NOT log in to the Qantas website or QFF account under any circumstances.** Automated logins may trigger security blocks on the account. If the user asks you to check their points, balance, or bookings, let them know this is disabled.
 
-You can log in to the user's QFF account to check balances, status, bookings, and activity.
-
-### Credentials
-
-Stored at `/workspace/group/qff-credentials.json`:
-```json
-{
-  "ffNumber": "1933190348",
-  "surname": "Nolf",
-  "password": "<stored after user provides it>"
-}
-```
-
-If `password` is null, ask the user to provide it and save it to the file.
-
-### Session state
-
-Saved at `/workspace/group/qff-auth.json` after first login. Load it on subsequent visits to skip re-authentication.
-
-### Login flow
-
-```bash
-agent-browser state load /workspace/group/qff-auth.json   # try this first
-agent-browser open https://www.qantas.com/au/en/frequent-flyer/member-centre.html
-agent-browser get url   # if redirected to login page, session has expired — do full login
-```
-
-**Full login (when session expired or no saved state):**
-1. `agent-browser open https://www.qantas.com/au/en/frequent-flyer/log-in.html`
-2. Fill FF number and password from credentials file
-3. Submit — Qantas will SMS a 2FA code to the user's phone
-4. Send message to user: "Qantas sent a verification code to your phone — please send it to me"
-5. Wait for user to reply with the code
-6. Enter the code in the browser
-7. Wait for successful login
-8. `agent-browser state save /workspace/group/qff-auth.json`
-
-### What you can check
-
-- *Points balance* and expiry date
-- *Status credits* earned this year and how many to next tier (Gold = 700 SC, Platinum = 1400 SC)
-- *Upcoming bookings*
-- *Recent points activity* (earned/redeemed)
-- *Lifetime credits* toward lifetime status
-
-Report in a clean WhatsApp message. Example:
-```
-*QFF Account — Nolf*
-• Points: 245,680 (expire Jan 2027)
-• Status: Gold · 340 SC earned · 360 SC to Platinum
-• Next flight: QF11 SYD→LHR 15 Mar
-```
