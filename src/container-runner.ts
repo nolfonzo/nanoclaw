@@ -184,8 +184,15 @@ function buildVolumeMounts(
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
  */
-function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+function readSecrets(isScheduledTask?: boolean): Record<string, string> {
+  const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  if (isScheduledTask) {
+    const extra = readEnvFile(['SCHEDULED_MODEL']);
+    if (extra['SCHEDULED_MODEL']) {
+      secrets['ANTHROPIC_MODEL'] = extra['SCHEDULED_MODEL'];
+    }
+  }
+  return secrets;
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
@@ -296,7 +303,7 @@ export async function runContainerAgent(
     let stderrTruncated = false;
 
     // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    input.secrets = readSecrets(input.isScheduledTask);
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs

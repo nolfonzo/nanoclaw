@@ -85,142 +85,7 @@ Key paths inside the container:
 
 ---
 
-## Managing Groups
-
-### Finding Available Groups
-
-Available groups are provided in `/workspace/ipc/available_groups.json`:
-
-```json
-{
-  "groups": [
-    {
-      "jid": "120363336345536173@g.us",
-      "name": "Family Chat",
-      "lastActivity": "2026-01-31T12:00:00.000Z",
-      "isRegistered": false
-    }
-  ],
-  "lastSync": "2026-01-31T12:00:00.000Z"
-}
-```
-
-Groups are ordered by most recent activity. The list is synced from WhatsApp daily.
-
-If a group the user mentions isn't in the list, request a fresh sync:
-
-```bash
-echo '{"type": "refresh_groups"}' > /workspace/ipc/tasks/refresh_$(date +%s).json
-```
-
-Then wait a moment and re-read `available_groups.json`.
-
-**Fallback**: Query the SQLite database directly:
-
-```bash
-sqlite3 /workspace/project/store/messages.db "
-  SELECT jid, name, last_message_time
-  FROM chats
-  WHERE jid LIKE '%@g.us' AND jid != '__group_sync__'
-  ORDER BY last_message_time DESC
-  LIMIT 10;
-"
-```
-
-### Registered Groups Config
-
-Groups are registered in `/workspace/project/data/registered_groups.json`:
-
-```json
-{
-  "1234567890-1234567890@g.us": {
-    "name": "Family Chat",
-    "folder": "family-chat",
-    "trigger": "@Weon",
-    "added_at": "2024-01-31T12:00:00.000Z"
-  }
-}
-```
-
-Fields:
-- **Key**: The WhatsApp JID (unique identifier for the chat)
-- **name**: Display name for the group
-- **folder**: Folder name under `groups/` for this group's files and memory
-- **trigger**: The trigger word (usually same as global, but could differ)
-- **requiresTrigger**: Whether `@trigger` prefix is needed (default: `true`). Set to `false` for solo/personal chats where all messages should be processed
-- **added_at**: ISO timestamp when registered
-
-### Trigger Behavior
-
-- **Main group**: No trigger needed — all messages are processed automatically
-- **Groups with `requiresTrigger: false`**: No trigger needed — all messages processed (use for 1-on-1 or solo chats)
-- **Other groups** (default): Messages must start with `@AssistantName` to be processed
-
-### Adding a Group
-
-1. Query the database to find the group's JID
-2. Read `/workspace/project/data/registered_groups.json`
-3. Add the new group entry with `containerConfig` if needed
-4. Write the updated JSON back
-5. Create the group folder: `/workspace/project/groups/{folder-name}/`
-6. Optionally create an initial `CLAUDE.md` for the group
-
-Example folder name conventions:
-- "Family Chat" → `family-chat`
-- "Work Team" → `work-team`
-- Use lowercase, hyphens instead of spaces
-
-#### Adding Additional Directories for a Group
-
-Groups can have extra directories mounted. Add `containerConfig` to their entry:
-
-```json
-{
-  "1234567890@g.us": {
-    "name": "Dev Team",
-    "folder": "dev-team",
-    "trigger": "@Weon",
-    "added_at": "2026-01-31T12:00:00Z",
-    "containerConfig": {
-      "additionalMounts": [
-        {
-          "hostPath": "~/projects/webapp",
-          "containerPath": "webapp",
-          "readonly": false
-        }
-      ]
-    }
-  }
-}
-```
-
-The directory will appear at `/workspace/extra/webapp` in that group's container.
-
-### Removing a Group
-
-1. Read `/workspace/project/data/registered_groups.json`
-2. Remove the entry for that group
-3. Write the updated JSON back
-4. The group folder and its files remain (don't delete them)
-
-### Listing Groups
-
-Read `/workspace/project/data/registered_groups.json` and format it nicely.
-
----
-
-## Global Memory
-
-You can read and write to `/workspace/project/groups/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
-
----
-
-## Scheduling for Other Groups
-
-When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:
-- `schedule_task(prompt: "...", schedule_type: "cron", schedule_value: "0 9 * * 1", target_group_jid: "120363336345536173@g.us")`
-
-The task will run in that group's context with access to their files and memory.
+For group management (add, remove, list groups, global memory, scheduling for other groups), read `/workspace/group/groups-admin.md`.
 
 ---
 
@@ -397,64 +262,95 @@ Then add the monitor's `id` to `first-notified.json` and save it.
 
 `first-notified.json` format: `["id1", "id2"]`
 
-### Step 3: Qantas points sales
+### Step 3: Qantas points sales and news
 
-Check two RSS feeds — no browser needed:
+Check RSS feeds — no browser needed:
 
 ```bash
 python3 << 'EOF'
 import json, urllib.request, xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
-FEEDS = [
-    "https://www.australianfrequentflyer.com.au/category/qantas/feed/",
-    "https://news.google.com/rss/search?q=qantas+points+sale&hl=en-AU&gl=AU&ceid=AU:en",
-]
+AFF_FEED = "https://www.australianfrequentflyer.com.au/category/qantas/feed/"
+GNEWS_FEED = "https://news.google.com/rss/search?q=qantas+points+sale&hl=en-AU&gl=AU&ceid=AU:en"
 KEYWORDS = ["points sale", "bonus points", "buy points", "purchase points",
             "points bonus", "double points", "transfer bonus", "points offer",
             "double status credits", "status credits offer", "status credits sale"]
 
-seen_file = "/workspace/extra/weon/qantas-monitor/points-sale.json"
+now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def fetch_feed(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    data = urllib.request.urlopen(req, timeout=10).read()
+    root = ET.fromstring(data)
+    return root.find("channel").findall("item")
+
+# --- Part A: Points sale alerts (keyword-filtered, AFF + Google News) ---
+ps_file = "/workspace/extra/weon/qantas-monitor/points-sale.json"
 try:
-    seen = json.load(open(seen_file))
+    ps_seen = json.load(open(ps_file))
 except Exception:
-    seen = {"seen_guids": [], "last_checked": None}
+    ps_seen = {"seen_guids": [], "last_checked": None}
+ps_guids = set(ps_seen.get("seen_guids", []))
+ps_new = []
 
-seen_guids = set(seen.get("seen_guids", []))
-new_items = []
-
-for url in FEEDS:
+for url in [AFF_FEED, GNEWS_FEED]:
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        data = urllib.request.urlopen(req, timeout=10).read()
-        root = ET.fromstring(data)
-        for item in root.find("channel").findall("item"):
+        for item in fetch_feed(url):
             guid = item.findtext("guid") or item.findtext("link") or ""
             title = item.findtext("title") or ""
             link = item.findtext("link") or ""
-            pub = item.findtext("pubDate") or ""
-            if guid in seen_guids:
+            if guid in ps_guids:
                 continue
-            seen_guids.add(guid)
+            ps_guids.add(guid)
             if any(kw in title.lower() for kw in KEYWORDS):
-                new_items.append({"title": title, "link": link, "pubDate": pub})
+                ps_new.append({"title": title, "link": link})
     except Exception as e:
         print(f"Feed error ({url}): {e}")
 
-seen["seen_guids"] = list(seen_guids)
-seen["last_checked"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-json.dump(seen, open(seen_file, "w"), indent=2)
+ps_seen["seen_guids"] = list(ps_guids)
+ps_seen["last_checked"] = now
+json.dump(ps_seen, open(ps_file, "w"), indent=2)
 
-if new_items:
-    for item in new_items:
-        print(f"NEW: {item['title']}")
-        print(f"     {item['link']}")
-else:
+for item in ps_new:
+    print(f"POINTS_SALE: {item['title']}\n  {item['link']}")
+if not ps_new:
     print("No new points sale announcements.")
+
+# --- Part B: AFF general Qantas news (all new articles) ---
+aff_file = "/workspace/extra/weon/qantas-monitor/aff-news-seen.json"
+try:
+    aff_seen = json.load(open(aff_file))
+except Exception:
+    aff_seen = {"seen_guids": [], "last_checked": None}
+aff_guids = set(aff_seen.get("seen_guids", []))
+aff_new = []
+
+try:
+    for item in fetch_feed(AFF_FEED):
+        guid = item.findtext("guid") or item.findtext("link") or ""
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        if guid not in aff_guids:
+            aff_guids.add(guid)
+            aff_new.append({"title": title, "link": link})
+except Exception as e:
+    print(f"AFF feed error: {e}")
+
+aff_seen["seen_guids"] = list(aff_guids)
+aff_seen["last_checked"] = now
+json.dump(aff_seen, open(aff_file, "w"), indent=2)
+
+for item in aff_new:
+    print(f"AFF_NEWS: {item['title']}\n  {item['link']}")
+if not aff_new:
+    print("No new AFF Qantas articles.")
 EOF
 ```
 
-A points sale = discounted rate or bonus to buy/transfer points (e.g. 15–20% bonus on purchases). If new items are found, send each as a message with the title and link. Track seen items by GUID in `points-sale.json` to avoid re-notifying.
+- `POINTS_SALE:` lines → send as points sale alert (title + link). A points sale = discounted rate or bonus to buy/transfer points.
+- `AFF_NEWS:` lines → send as a Qantas news update from AFF (title + link).
+- Track seen items by GUID: points sale in `points-sale.json`, AFF news in `aff-news-seen.json`.
 
 ### Step 4: Cash price requests
 
