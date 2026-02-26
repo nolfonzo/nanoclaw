@@ -399,11 +399,62 @@ Then add the monitor's `id` to `first-notified.json` and save it.
 
 ### Step 3: Qantas points sales
 
-Check for points sale announcements from two sources using agent-browser:
-1. **Qantas Newsroom** (`https://www.qantasnewsroom.com.au/`): Scan the homepage for any recent articles mentioning "buy points", "bonus points", "points sale", or "purchase points".
-2. **AFF** (`https://www.australianfrequentflyer.com.au/latest-news/`): Look for announcements about points sales or bonus point offers.
+Check two RSS feeds — no browser needed:
 
-A points sale = discounted rate or bonus to buy/transfer points (e.g. 15–20% bonus on purchases). Notify immediately if a new sale is found. Track in `/workspace/extra/weon/qantas-monitor/points-sale.json`.
+```bash
+python3 << 'EOF'
+import json, urllib.request, xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+
+FEEDS = [
+    "https://www.australianfrequentflyer.com.au/category/qantas/feed/",
+    "https://news.google.com/rss/search?q=qantas+points+sale&hl=en-AU&gl=AU&ceid=AU:en",
+]
+KEYWORDS = ["points sale", "bonus points", "buy points", "purchase points",
+            "points bonus", "double points", "transfer bonus", "points offer",
+            "double status credits", "status credits offer", "status credits sale"]
+
+seen_file = "/workspace/extra/weon/qantas-monitor/points-sale.json"
+try:
+    seen = json.load(open(seen_file))
+except Exception:
+    seen = {"seen_guids": [], "last_checked": None}
+
+seen_guids = set(seen.get("seen_guids", []))
+new_items = []
+
+for url in FEEDS:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = urllib.request.urlopen(req, timeout=10).read()
+        root = ET.fromstring(data)
+        for item in root.find("channel").findall("item"):
+            guid = item.findtext("guid") or item.findtext("link") or ""
+            title = item.findtext("title") or ""
+            link = item.findtext("link") or ""
+            pub = item.findtext("pubDate") or ""
+            if guid in seen_guids:
+                continue
+            seen_guids.add(guid)
+            if any(kw in title.lower() for kw in KEYWORDS):
+                new_items.append({"title": title, "link": link, "pubDate": pub})
+    except Exception as e:
+        print(f"Feed error ({url}): {e}")
+
+seen["seen_guids"] = list(seen_guids)
+seen["last_checked"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+json.dump(seen, open(seen_file, "w"), indent=2)
+
+if new_items:
+    for item in new_items:
+        print(f"NEW: {item['title']}")
+        print(f"     {item['link']}")
+else:
+    print("No new points sale announcements.")
+EOF
+```
+
+A points sale = discounted rate or bonus to buy/transfer points (e.g. 15–20% bonus on purchases). If new items are found, send each as a message with the title and link. Track seen items by GUID in `points-sale.json` to avoid re-notifying.
 
 ### Step 4: Cash price requests
 
