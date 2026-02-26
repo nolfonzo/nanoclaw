@@ -17,6 +17,7 @@ groups/main/*
 groups/global/*
 !groups/main/CLAUDE.md
 !groups/main/groups-admin.md
+!groups/main/flight-lookup.md
 !groups/global/CLAUDE.md
 
 # Secrets
