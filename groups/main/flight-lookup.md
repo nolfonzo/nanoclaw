@@ -46,7 +46,7 @@ for f in data.get('best_flights', []) + data.get('other_flights', []):
 "
 ```
 
-`include_airlines=QF` to filter Qantas only. Omit `return_date` and set `type=2` for one-way. Free plan: 100 searches/month.
+`include_airlines=QF` to filter Qantas only. Omit `return_date` and set `type=2` for one-way. Free plan: 250 searches/month.
 
 **fast-flights (date range sampling):**
 
