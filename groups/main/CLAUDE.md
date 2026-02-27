@@ -9,18 +9,25 @@ Before using `agent-browser` for any data lookup, check if a direct API can answ
 **SerpApi** (key: `grep SERPAPI_KEY /workspace/project/.env | cut -d= -f2`) supports:
 - `engine=google_flights` — flight prices and availability (see `/workspace/group/flight-lookup.md`)
 - `engine=google_hotels` — hotel availability and rates by date range
+- `engine=google_maps` — local businesses, hours, reviews, directions
 - `engine=google` — general web search with structured results
 
-**Google Hotels example:**
 ```bash
 KEY=$(grep SERPAPI_KEY /workspace/project/.env | cut -d= -f2)
-curl -s "https://serpapi.com/search.json?engine=google_hotels\
-&q=Enjoy+Hotel+Pucon&check_in_date=2026-03-01&check_out_date=2026-03-05\
-&adults=2&currency=CLP&api_key=$KEY" | python3 -c "
+
+# Hotels: availability and rates
+curl -s "https://serpapi.com/search.json?engine=google_hotels&q=Enjoy+Hotel+Pucon&check_in_date=2026-03-01&check_out_date=2026-03-05&adults=2&currency=CLP&api_key=$KEY" | python3 -c "
 import json,sys; data=json.load(sys.stdin)
 for p in data.get('properties',[])[:5]:
     r=p.get('rate_per_night',{}); t=p.get('total_rate',{})
     print(f\"{p['name']} | {r.get('lowest','?')}/night | total {t.get('lowest','?')} | {p.get('overall_rating','?')}★\")
+"
+
+# Maps: local search (restaurants, businesses, etc.)
+curl -s "https://serpapi.com/search.json?engine=google_maps&q=sushi+Santiago&type=search&api_key=$KEY" | python3 -c "
+import json,sys; data=json.load(sys.stdin)
+for r in data.get('local_results',[])[:5]:
+    print(f\"{r.get('title')} | {r.get('rating','?')}★ ({r.get('reviews','?')} reviews) | {r.get('address','?')} | {r.get('open_state','?')}\")
 "
 ```
 
